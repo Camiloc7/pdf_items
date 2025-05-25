@@ -1,4 +1,12 @@
 {
     "regex_patterns": {},
-    "nlp_terms": []
+    "nlp_terms": [
+        "Alturas, valoración médica ocupacional",
+        "YESO ECOYESO BULTO",
+        "RODILLO FLICA 9",
+        "BROCHA JAMKA DE 3",
+        "LLANA LUKIN",
+        "PLASTICO METRO"
+    ],
+    "item_patterns": {}
 }

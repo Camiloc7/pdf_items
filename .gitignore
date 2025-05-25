@@ -1,14 +1,5 @@
-# .gitignore
-
-# Entornos virtuales
 venv/
-
-# Archivos del sistema
 .DS_Store
-
-# Archivos de entorno
 .env
-
-# __pycache__
 __pycache__/
 *.py[cod]
