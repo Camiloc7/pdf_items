@@ -19,7 +19,7 @@ class Factura(Base):
     __tablename__ = 'facturas'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    numero_factura = Column(String(255), nullable=False)
+    numero_factura = Column(String(255))
     fecha_emision = Column(DateTime)
     fecha_vencimiento = Column(DateTime)
     monto_subtotal = Column(Float)

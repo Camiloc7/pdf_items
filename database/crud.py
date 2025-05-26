@@ -1,3 +1,4 @@
+
 import logging
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -317,6 +318,7 @@ class ItemFacturaCRUD:
             self.db.rollback()
             logger.error(f"Error inesperado al eliminar ítem: {e}", exc_info=True)
             return False
+        
 class ItemCorrectionCRUD:
     def __init__(self, db_session: Session):
         self.db = db_session
@@ -415,10 +417,3 @@ class ItemCorrectionCRUD:
             self.db.rollback()
             logger.error(f"Error inesperado al eliminar corrección de ítem: {e}", exc_info=True)
             return False
-
-    def get_all_item_corrections(self) -> List[ItemCorregido]:
-        try:
-            return self.db.query(ItemCorregido).all()
-        except Exception as e:
-            logger.error(f"Error al obtener todas las correcciones de ítems: {e}", exc_info=True)
-            return []

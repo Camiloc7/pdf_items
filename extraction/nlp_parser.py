@@ -162,3 +162,28 @@ class NLPParser:
                         logger.debug(f"NLP (Matcher): Extraído 'customer_name' cerca de '{span.text}': '{potential_name}'")
         
         return extracted_data
+
+class NLPParserML:
+    def __init__(self, model_path: str):
+        try:
+            self.nlp = spacy.load(model_path)  # Cargar modelo entrenado
+            logger.info(f"Modelo spaCy '{model_path}' cargado exitosamente.")
+        except OSError:
+            logger.error(f"El modelo spaCy '{model_path}' no está disponible. Por favor, entrene o descargue un modelo.")
+            raise
+
+    def extract_entities(self, text: str) -> Dict[str, Any]:
+        doc = self.nlp(text)
+        extracted_data = {}
+
+        for ent in doc.ents:
+            if ent.label_ == "SUPPLIER_NAME":
+                extracted_data["supplier_name"] = ent.text
+            elif ent.label_ == "CUSTOMER_NAME":
+                extracted_data["customer_name"] = ent.text
+            elif ent.label_ == "DATE":
+                extracted_data["issue_date"] = ent.text
+            elif ent.label_ == "TOTAL_AMOUNT":
+                extracted_data["total_amount"] = ent.text
+
+        return extracted_data

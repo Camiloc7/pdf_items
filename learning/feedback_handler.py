@@ -7,13 +7,19 @@ from database.crud import CorrectedFieldCRUD, ItemCorrectionCRUD
 from database.models import SessionLocal, CampoCorregido, ItemCorregido 
 from datetime import datetime
 from config.settings import settings
+from sklearn.ensemble import RandomForestClassifier
+import pandas as pd
+import pickle
+
 logger = logging.getLogger(__name__)
+
 class FeedbackHandler:
     def __init__(self):
         self.db_session = SessionLocal()
         self.corrected_field_crud = CorrectedFieldCRUD(self.db_session)
         self.item_correction_crud = ItemCorrectionCRUD(self.db_session) 
         self.learned_patterns = self._load_learned_patterns()
+
     def _load_learned_patterns(self) -> Dict[str, Any]:
         if os.path.exists(settings.LEARNED_PATTERNS_FILE):
             with open(settings.LEARNED_PATTERNS_FILE, 'r', encoding='utf-8') as f:
@@ -26,10 +32,12 @@ class FeedbackHandler:
                     return {"regex_patterns": {}, "nlp_terms": [], "item_patterns": {}}
         logger.info("No se encontró el archivo de patrones aprendidos. Se iniciará con patrones vacíos.")
         return {"regex_patterns": {}, "nlp_terms": [], "item_patterns": {}}
+
     def _save_learned_patterns(self):
         with open(settings.LEARNED_PATTERNS_FILE, 'w', encoding='utf-8') as f:
             json.dump(self.learned_patterns, f, indent=4, ensure_ascii=False)
         logger.info(f"Patrones de aprendizaje guardados en {settings.LEARNED_PATTERNS_FILE}")
+
     def record_correction(self, invoice_id: int, field_name: str, original_value: str, corrected_value: str) -> Optional[CampoCorregido]:
         try:
             correction = self.corrected_field_crud.add_corrected_field(
@@ -44,6 +52,7 @@ class FeedbackHandler:
             self.db_session.rollback()
             logger.error(f"Error al registrar corrección en DB: {e}")
             return None
+
     def record_item_correction(
         self,
         invoice_id: int,
@@ -68,6 +77,7 @@ class FeedbackHandler:
             self.db_session.rollback()
             logger.error(f"Error al registrar corrección de ítem en DB: {e}")
             return None
+
     def learn_from_corrections(self) -> None:
         all_header_corrections = self.corrected_field_crud.get_all_corrected_fields()
         all_item_corrections = self.item_correction_crud.get_all_item_corrections()
@@ -138,16 +148,20 @@ class FeedbackHandler:
         self.learned_patterns["item_patterns"] = new_item_patterns 
         self._save_learned_patterns()
         logger.info("Proceso de aprendizaje completado y patrones guardados.")
+
     def close_db_session(self):
         if self.db_session and self.db_session.is_active:
             self.db_session.close()
             logger.info("Sesión de base de datos cerrada en FeedbackHandler.")
+
     def __del__(self):
         self.close_db_session()
+
     def get_corrections_for_invoice(self, invoice_id: int) -> Dict[str, str]:
         corrections_list = self.corrected_field_crud.get_corrected_fields_for_invoice(invoice_id)
         corrections_dict = {c.nombre_campo: c.valor_corregido for c in corrections_list}
         return corrections_dict
+
     def apply_corrections_to_invoice_data(self, invoice_id: int, extracted_data: Dict[str, Any]) -> Dict[str, Any]:
         logger.debug(f"Aplicando correcciones de cabecera para la factura ID: {invoice_id}")
         header_corrections = self.get_corrections_for_invoice(invoice_id)
@@ -285,3 +299,23 @@ class FeedbackHandler:
 
     def __del__(self):
         self.close_db_session()
+
+class FeedbackHandlerML:
+    def __init__(self, model_path: str):
+        try:
+            with open(model_path, 'rb') as f:
+                self.model = pickle.load(f)
+            logger.info(f"Modelo de corrección cargado desde '{model_path}'.")
+        except FileNotFoundError:
+            logger.error(f"No se encontró el modelo en '{model_path}'. Por favor, entrene el modelo primero.")
+            raise
+
+    def predict_correction(self, field_name: str, original_value: str) -> str:
+        # Crear un vector de características para el modelo
+        features = pd.DataFrame([{
+            "field_name": field_name,
+            "original_value": original_value
+        }])
+        # Predecir el valor corregido
+        predicted_value = self.model.predict(features)[0]
+        return predicted_value
