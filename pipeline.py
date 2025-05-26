@@ -24,6 +24,7 @@ class InvoiceProcessingPipeline:
         # Aplicar correcciones
         for field, value in extracted_data.items():
             corrected_value = self.correction_handler.predict_correction(field, value)
-            extracted_data[field] = corrected_value
+            if not value:  # Solo aplicar corrección si el valor original está vacío
+                extracted_data[field] = corrected_value
 
         return extracted_data

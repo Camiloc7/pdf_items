@@ -21,82 +21,75 @@ from ingestion.email_reader import obtener_correos_con_facturas
 from ingestion.zip_handler import extraer_archivos_de_zip
 from extraction.xml_parser import parse_invoice_xml, extract_nested_invoice_xml
 from concurrent.futures import ThreadPoolExecutor
-
 logging.basicConfig(level=settings.LOG_LEVEL, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
 def process_document_logic(file_path: str, email_metadata: Dict[str, Any] = None) -> Optional[Dict[str, Any]]:
-    extracted_data = None
+    extracted_data_from_xml = None
+    extracted_data_from_pdf = None
     pdf_path_to_process = None
     temp_dir_for_zip_extraction = None
-
     if file_path.lower().endswith('.zip'):
         logger.info(f"Manejando archivo ZIP: {file_path}")
         extracted_content = extraer_archivos_de_zip(file_path)
         xml_files = extracted_content['xmls']
         pdf_files = extracted_content['pdfs']
         temp_dir_for_zip_extraction = extracted_content['temp_dir']
-
-        # Intentar procesar los XMLs primero
         if xml_files:
             for xml_zip_path in xml_files:
                 logger.info(f"  Intentando extraer XML de factura anidado de: {xml_zip_path}")
                 nested_invoice_xml_string = extract_nested_invoice_xml(xml_zip_path)
-                if nested_invoice_xml_string:
-                    logger.info("  XML de factura anidado encontrado. Intentando parsear...")
-                    extracted_data = parse_invoice_xml(nested_invoice_xml_string)
-                    if extracted_data and extracted_data.get('numero_factura') and extracted_data.get('monto_total'):
-                        logger.info("  Datos esenciales extraídos exitosamente del XML anidado.")
-                        # Asociar el PDF si existe
-                        if pdf_files:
-                            pdf_path_to_process = pdf_files[0]
+                if not nested_invoice_xml_string:
+                    logger.info(f"  No se encontró XML anidado en {xml_zip_path}. Intentando leer el archivo directamente como XML de factura.")
+                    try:
+                        with open(xml_zip_path, 'r', encoding='utf-8') as f:
+                            direct_xml_content = f.read()
+                        if '<Invoice' in direct_xml_content or '<FacturaElectronica' in direct_xml_content or '<DianExtensions>' in direct_xml_content:
+                            nested_invoice_xml_string = direct_xml_content
+                            logger.info("  El archivo ZIP XML parece ser directamente el XML de la factura.")
                         else:
-                            extracted_data['file_path'] = xml_zip_path
-                        break  # Salir del bucle si se procesó un XML exitosamente
+                            logger.warning(f"  El archivo {xml_zip_path} no parece ser un XML de factura directo.")
+                    except Exception as e:
+                        logger.warning(f"  Error al leer {xml_zip_path} directamente como XML: {e}")
+                if nested_invoice_xml_string:
+                    logger.info("  XML de factura disponible. Intentando parsear para datos esenciales...")
+                    parsed_xml_data = parse_invoice_xml(nested_invoice_xml_string)
+                    if parsed_xml_data and parsed_xml_data.get('numero_factura') and parsed_xml_data.get('monto_total'):
+                        extracted_data_from_xml = parsed_xml_data
+                        extracted_data_from_xml['file_path'] = xml_zip_path 
+                        logger.info("  Datos esenciales de la factura extraídos exitosamente del XML. **Se omitirá el procesamiento de PDF.**")
+                        break
                     else:
-                        logger.warning("  XML parseado pero faltan datos esenciales o el parsing falló. Recurriendo a PDF.")
-                        extracted_data = None  # Resetear para intentar con PDFs
+                        logger.warning("  XML parseado, pero faltan 'numero_factura' o 'monto_total' esenciales. Se procederá a intentar con PDF.")
                 else:
-                    logger.warning(f"  No se encontró XML de factura anidado válido en {xml_zip_path}.")
-
-        # Si no se pudo procesar el XML, intentar procesar los PDFs
-        if not extracted_data and pdf_files:
-            logger.info("  Procesando PDFs extraídos del ZIP.")
-            pdf_path_to_process = pdf_files[0]
-
+                    logger.warning(f"  No se encontró XML de factura anidado o directo válido en {xml_zip_path}.")
+        if not extracted_data_from_xml and pdf_files:
+            pdf_path_to_process = pdf_files[0] 
     elif file_path.lower().endswith('.pdf'):
         pdf_path_to_process = file_path
         logger.info(f"Procesando archivo PDF directamente: {file_path}")
-
-    # Procesar el PDF si se identificó uno para procesar
-    if pdf_path_to_process:
-        logger.info(f"Iniciando extracción por PDF para: {pdf_path_to_process}")
+    if not extracted_data_from_xml and pdf_path_to_process:
+        logger.info(f"No se encontraron datos XML válidos o no había XML. Iniciando extracción por PDF para: {pdf_path_to_process}")
         pdf_reader = PDFReader()
         raw_text_pdf_direct = pdf_reader.extract_text(pdf_path_to_process)
-
         ocr_engine = OCREngine()
         raw_text_ocr = ocr_engine.pdf_to_text_ocr(pdf_path_to_process)
-
+        
         full_text_content = raw_text_pdf_direct if raw_text_pdf_direct else ""
         if raw_text_ocr and raw_text_ocr not in full_text_content:
             full_text_content += "\n" + raw_text_ocr
 
         if not full_text_content.strip():
-            logger.warning(f"No se pudo extraer texto significativo de {pdf_path_to_process}.")
-            return None
-
+            logger.warning(f"No se pudo extraer texto significativo de {pdf_path_to_process}. No se podrá extraer datos del PDF.")
         regex_parser = RegexParser()
         regex_data = regex_parser.extract_fields(full_text_content)
-
+        
         table_extractor = TableExtractor()
         extracted_line_items = table_extractor.extract_and_parse_line_items(pdf_path_to_process)
         if not extracted_line_items:
             logger.info(f"No se encontraron ítems de tabla para {pdf_path_to_process}, intentando con RegexParser.")
             extracted_line_items = regex_parser.extract_line_items(full_text_content)
-
         nlp_parser = NLPParser()
         nlp_data = nlp_parser.extract_entities(full_text_content)
-
         combiner = ResultCombiner()
         extracted_data_from_pdf = combiner.combine_results(
             pdf_direct_data={},
@@ -107,26 +100,28 @@ def process_document_logic(file_path: str, email_metadata: Dict[str, Any] = None
         extracted_data_from_pdf['items'] = extracted_line_items
         extracted_data_from_pdf['raw_text'] = full_text_content
         extracted_data_from_pdf['file_path'] = pdf_path_to_process
-
-        # Si ya hay datos del XML, combinar priorizando los datos del XML
-        if extracted_data:
-            logger.info("Combinando datos del XML con los datos del PDF, priorizando los del XML.")
-            extracted_data = {**extracted_data_from_pdf, **extracted_data}  # Los datos del XML sobrescriben los del PDF
-        else:
-            extracted_data = extracted_data_from_pdf
-
         logger.info(f"Extracción por PDF completada para {pdf_path_to_process}.")
-
-    if extracted_data and email_metadata:
-        extracted_data.update(email_metadata)
-
-    # Limpiar el directorio temporal del ZIP después de procesar su contenido
+    final_extracted_data = {}
+    if extracted_data_from_xml:
+        final_extracted_data.update(extracted_data_from_xml)
+        logger.info("Datos finales obtenidos del XML (priorizado).")
+    elif extracted_data_from_pdf:
+        final_extracted_data.update(extracted_data_from_pdf)
+        logger.info("Datos finales obtenidos del PDF (fallback).")
+    else:
+        logger.warning(f"No se pudieron extraer datos de XML ni de PDF para {file_path}.")
+    if email_metadata:
+        final_extracted_data.update(email_metadata)
     if temp_dir_for_zip_extraction and os.path.exists(temp_dir_for_zip_extraction):
         shutil.rmtree(temp_dir_for_zip_extraction)
         logger.info(f"Directorio temporal '{temp_dir_for_zip_extraction}' limpiado.")
-
-    return extracted_data
-
+    if 'file_path' not in final_extracted_data and file_path:
+        final_extracted_data['file_path'] = file_path
+    if not final_extracted_data or (len(final_extracted_data) == 1 and 'file_path' in final_extracted_data and final_extracted_data['file_path'] == file_path):
+        logger.warning(f"No se pudieron extraer datos significativos para el archivo: {file_path}")
+        return None
+    logger.info(f"--- Proceso completado para {file_path}. Resultado: {final_extracted_data}")
+    return final_extracted_data
 def process_invoice(pdf_path: str) -> Optional[Dict[str, Any]]:
     logger.info(f"Iniciando extracción para PDF: {pdf_path}")
     pdf_reader = PDFReader()
@@ -160,99 +155,94 @@ def process_invoice(pdf_path: str) -> Optional[Dict[str, Any]]:
     combined_data['file_path'] = pdf_path 
     logger.info(f"Extracción completada para {pdf_path}.")
     return combined_data
-
-def save_invoice_to_db(invoice_data: Dict[str, Any]) -> Optional[int]:
+def save_invoice_to_db(invoice_data: Dict[str, Any], user_id: Optional[int] = None) -> Optional[int]:
     db_session = SessionLocal()
     invoice_crud = InvoiceCRUD(db_session)
     corrected_field_crud = CorrectedFieldCRUD(db_session)
     field_name_mapping = {
-        "invoice_number": "numero_factura",
-        "issue_date": "fecha_emision",
-        "due_date": "fecha_vencimiento",
-        "subtotal_amount": "monto_subtotal",
-        "tax_amount": "monto_impuesto",
-        "total_amount": "monto_total",
-        "currency": "moneda",
-        "supplier_name": "nombre_proveedor",
-        "supplier_tax_id": "nit_proveedor",
-        "customer_name": "nombre_cliente",
-        "customer_tax_id": "nit_cliente",
+        "numero_factura": "numero_factura", 
+        "fecha_emision": "fecha_emision",
+        "fecha_vencimiento": "fecha_vencimiento",
+        "monto_subtotal": "monto_subtotal",
+        "monto_impuesto": "monto_impuesto",
+        "monto_total": "monto_total",
+        "moneda": "moneda",
+        "nombre_proveedor": "nombre_proveedor",
+        "nit_proveedor": "nit_proveedor",
+        "nombre_cliente": "nombre_cliente",
+        "nit_cliente": "nit_cliente",
         "cufe": "cufe",
-        "payment_method": "metodo_pago",
+        "metodo_pago": "metodo_pago",
         "raw_text": "texto_crudo",
         "file_path": "ruta_archivo", 
         "asunto_correo": "asunto_correo",
         "remitente_correo": "remitente_correo",
         "correo_cliente": "correo_cliente",
+        "hora_emision": "hora_emision", 
+        "email_proveedor": "email_proveedor" 
     }
-    invoice_main_data_es = {}
+    invoice_main_data_for_crud = {}
     for extracted_key, db_column_name in field_name_mapping.items():
         value = invoice_data.get(extracted_key)
-        if value == "No encontrado" or value == "" or value is None:
-            invoice_main_data_es[db_column_name] = None
+        if value == "No encontrado" or value == "":
+            invoice_main_data_for_crud[db_column_name] = None
         else:
-            invoice_main_data_es[db_column_name] = value
-
-    items_data_es = []
+            invoice_main_data_for_crud[db_column_name] = value
+    if 'file_path' in invoice_data and 'ruta_archivo' not in invoice_main_data_for_crud:
+        invoice_main_data_for_crud['ruta_archivo'] = invoice_data['file_path']
+    items_data_for_crud = []
     for item in invoice_data.get('items', []):
-        items_data_es.append({
-            "descripcion": item.get("description"),
-            "cantidad": item.get("quantity"),
-            "precio_unitario": item.get("unit_price"),
-            "total_linea": item.get("line_total"),
+        items_data_for_crud.append({
+            "descripcion": item.get("description") or item.get("descripcion"),
+            "cantidad": item.get("quantity") or item.get("cantidad"),
+            "precio_unitario": item.get("unit_price") or item.get("precio_unitario"),
+            "total_linea": item.get("line_total") or item.get("total_linea"),
         })
-    usuario_id = None
-    if invoice_main_data_es.get("correo_cliente"):
+    current_user_id = user_id
+    if invoice_main_data_for_crud.get("correo_cliente"):
         try:
-            user_obj = db_session.query(Usuario).filter(Usuario.correo == invoice_main_data_es["correo_cliente"]).first()
+            user_obj = db_session.query(Usuario).filter(Usuario.correo == invoice_main_data_for_crud["correo_cliente"]).first()
             if user_obj:
-                usuario_id = user_obj.id
-                logger.info(f"Factura asociada al usuario ID: {usuario_id} ({invoice_main_data_es['correo_cliente']})")
+                current_user_id = user_obj.id
+                logger.info(f"Factura asociada al usuario ID: {current_user_id} ({invoice_main_data_for_crud['correo_cliente']})")
         except Exception as e:
-            logger.error(f"Error al buscar usuario por correo '{invoice_main_data_es['correo_cliente']}': {e}")
-    invoice_main_data_es['usuario_id'] = usuario_id 
-    existing_invoice = db_session.query(Factura).filter(Factura.ruta_archivo == invoice_data.get("file_path")).first()
-    if existing_invoice:
-        logger.info(f"Actualizando factura existente para: {invoice_data.get('file_path')}")
-        corrections = corrected_field_crud.get_corrected_fields_for_invoice(existing_invoice.id)
-        corrections_dict = {corr.nombre_campo: corr.valor_corregido for corr in corrections}
-        for db_column_name, extracted_value in list(invoice_main_data_es.items()):
-            if db_column_name in corrections_dict:
-                corrected_value = corrections_dict[db_column_name]
-                if "monto" in db_column_name and corrected_value is not None:
-                    try:
-                        invoice_main_data_es[db_column_name] = float(str(corrected_value).replace('.', '').replace(',', '.'))
-                    except ValueError:
-                        logger.warning(f"No se pudo convertir corrección '{corrected_value}' a float para '{db_column_name}'. Se usa el valor extraído.")
-                        invoice_main_data_es[db_column_name] = extracted_value 
-                elif "fecha" in db_column_name and corrected_value is not None:
-                    try:
-                        if isinstance(corrected_value, str):
-                            if len(corrected_value) == 10 and corrected_value.count('-') == 2:
-                                invoice_main_data_es[db_column_name] = datetime.strptime(corrected_value, "%Y-%m-%d").date()
-                            elif len(corrected_value) >= 10 and corrected_value.count('/') == 2:
-                                invoice_main_data_es[db_column_name] = datetime.strptime(corrected_value.split(',')[0].strip(), "%d/%m/%Y").date()
-                            else:
-                                logger.warning(f"Formato de fecha corregida desconocido para '{corrected_value}'. Se usa el valor extraído.")
-                                invoice_main_data_es[db_column_name] = extracted_value # Usar el valor extraído si la corrección es inválida
-                        elif isinstance(corrected_value, date):
-                            invoice_main_data_es[db_column_name] = corrected_value
-                    except ValueError:
-                        logger.warning(f"No se pudo parsear fecha corregida '{corrected_value}' para '{db_column_name}'. Se usa el valor extraído.")
-                        invoice_main_data_es[db_column_name] = extracted_value
-                else:
-                    invoice_main_data_es[db_column_name] = corrected_value
-        invoice_obj = invoice_crud.update_invoice(existing_invoice.id, invoice_main_data_es, items_data_es)
-    else:
-        logger.info(f"Creando nueva factura para: {invoice_data.get('file_path')}")
-        invoice_obj = invoice_crud.create_invoice(invoice_main_data_es, items_data_es)
-    db_session.close()
-    if invoice_obj:
-        logger.info(f"Factura guardada/actualizada exitosamente. ID: {invoice_obj.id}")
-        return invoice_obj.id
-    logger.error(f"Fallo al guardar/actualizar la factura para {invoice_data.get('file_path')}.")
-    return None
+            logger.error(f"Error al buscar usuario por correo '{invoice_main_data_for_crud['correo_cliente']}': {e}")
+    invoice_main_data_for_crud['usuario_id'] = current_user_id
 
+    try:
+        existing_invoice = db_session.query(Factura).filter(
+            Factura.ruta_archivo == invoice_main_data_for_crud.get("ruta_archivo")
+        ).first()
+
+        if existing_invoice:
+            logger.info(f"Actualizando factura existente para: {invoice_main_data_for_crud.get('ruta_archivo')}")
+            corrections = corrected_field_crud.get_corrected_fields_for_invoice(existing_invoice.id)
+            corrections_dict = {corr.nombre_campo: corr.valor_corregido for corr in corrections}
+            for db_column_name, extracted_value in list(invoice_main_data_for_crud.items()):
+                if db_column_name in corrections_dict:
+                    invoice_main_data_for_crud[db_column_name] = corrections_dict[db_column_name]
+                    logger.info(f"Aplicando corrección para '{db_column_name}': {corrections_dict[db_column_name]}")
+            invoice_obj = invoice_crud.update_invoice(existing_invoice.id, invoice_main_data_for_crud, items_data_for_crud)
+        else:
+            logger.info(f"Creando nueva factura para: {invoice_main_data_for_crud.get('ruta_archivo')}")
+            invoice_obj_id = invoice_crud.create_invoice(invoice_main_data_for_crud, items_data_for_crud)
+            if invoice_obj_id:
+                invoice_obj = invoice_crud.get_invoice_by_id(invoice_obj_id)
+            else:
+                invoice_obj = None 
+        db_session.close() 
+        if invoice_obj:
+            logger.info(f"Factura guardada/actualizada exitosamente. ID: {invoice_obj.id}")
+            return invoice_obj.id
+        logger.error(f"Fallo al guardar/actualizar la factura para {invoice_main_data_for_crud.get('ruta_archivo')}.")
+        return None
+    except Exception as e:
+        db_session.rollback()
+        logger.error(f"Error inesperado al guardar/actualizar factura: {e}", exc_info=True)
+        return None
+    finally:
+        if db_session.is_active: 
+            db_session.close()
 def apply_header_correction(invoice_id: int, field_name: str, original_value: str, corrected_value: str):
     db_session = SessionLocal()
     crud_handler = CorrectedFieldCRUD(db_session)
@@ -309,7 +299,6 @@ def apply_header_correction(invoice_id: int, field_name: str, original_value: st
         feedback_handler.learn_from_corrections()
         feedback_handler.close_db_session()
     db_session.close()
-
 def apply_item_correction(invoice_id: int, item_id: int, field_name: str, original_value: Any, corrected_value: Any):
     db_session = SessionLocal()
     item_correction_crud = ItemCorrectionCRUD(db_session)
@@ -334,7 +323,6 @@ def apply_item_correction(invoice_id: int, item_id: int, field_name: str, origin
     else:
         logger.error(f"Fallo al registrar corrección de ítem para factura {invoice_id}, ítem {item_id}.")
     db_session.close()
-
 def add_item_to_invoice(invoice_id: int, item_data: Dict[str, Any]):
     db_session = SessionLocal()
     item_crud = ItemFacturaCRUD(db_session)
@@ -370,7 +358,6 @@ def add_item_to_invoice(invoice_id: int, item_data: Dict[str, Any]):
         logger.error(f"Error al agregar ítem a la factura {invoice_id}: {e}", exc_info=True)
     finally:
         db_session.close()
-
 def update_invoice_item(invoice_id: int, item_id: int, item_changes: Dict[str, Any]):
     db_session = SessionLocal()
     item_crud = ItemFacturaCRUD(db_session)
@@ -406,7 +393,6 @@ def update_invoice_item(invoice_id: int, item_id: int, item_changes: Dict[str, A
         logger.error(f"Error al actualizar ítem {item_id} de factura {invoice_id}: {e}", exc_info=True)
     finally:
         db_session.close()
-
 def delete_invoice_item(invoice_id: int, item_id: int):
     db_session = SessionLocal()
     item_crud = ItemFacturaCRUD(db_session)
@@ -448,14 +434,12 @@ def run_invoice_processing_loop():
         logger.info("Patrones de aprendizaje cargados/actualizados.")
     except Exception as e:
         logger.error(f"Error al cargar/actualizar patrones de aprendizaje al inicio: {e}", exc_info=True)
-
     while True:
         logger.info("-" * 50)
         logger.info("Iniciando ciclo de búsqueda y procesamiento de facturas...")
         logger.info("Revisando correos para nuevas facturas...")
         start_time = time.time()
         logger.info(f"Inicio del procesamiento de correos: {datetime.now()}")
-
         try:
             correos_encontrados = obtener_correos_con_facturas()
             if not correos_encontrados:
@@ -466,30 +450,21 @@ def run_invoice_processing_loop():
                     email_metadata_for_invoice = {
                         "asunto_correo": correo.get("subject"),
                         "remitente_correo": correo.get("from"),
-                        "correo_cliente": correo.get("cliente_correo") # Asegúrate de que obtener_correos_con_facturas devuelva esto
+                        "correo_cliente": correo.get("cliente_correo")
                     }
-
-                    # No necesitas ThreadPoolExecutor aquí directamente para los adjuntos,
-                    # ya que process_document_logic maneja cada adjunto de forma individual.
-                    # Si un ZIP tiene varios PDFs/XMLs, process_document_logic los gestiona.
                     for adjunto_path_temp in correo["adjuntos_temp_paths"]:
                         try:
-                            # ¡Aquí llamas a la nueva función unificada!
                             extracted_data = process_document_logic(adjunto_path_temp, email_metadata_for_invoice)
 
                             if extracted_data:
                                 invoice_id = save_invoice_to_db(extracted_data)
                                 if invoice_id:
                                     logger.info(f"Archivo '{os.path.basename(extracted_data['file_path'])}' procesado y guardado exitosamente.")
-                                    # Mover el archivo (original o el PDF extraído si aplica)
-                                    # La limpieza del temp_dir del ZIP ya se hace en process_document_logic
-                                    # Si el adjunto original es un PDF y no es un path temporal de un ZIP, lo movemos
                                     if not adjunto_path_temp.lower().endswith('.zip') and os.path.exists(adjunto_path_temp):
                                         destination_path_processed = os.path.join(settings.PDF_PROCESSED_DIR, os.path.basename(adjunto_path_temp))
                                         shutil.move(adjunto_path_temp, destination_path_processed)
                                 else:
                                     logger.warning(f"No se pudo guardar la factura para '{adjunto_path_temp}'.")
-                                    # Mover el adjunto original a errores si aún existe
                                     if os.path.exists(adjunto_path_temp):
                                         shutil.move(adjunto_path_temp, os.path.join(settings.PDF_ERROR_DIR, os.path.basename(adjunto_path_temp)))
                             else:
@@ -502,40 +477,31 @@ def run_invoice_processing_loop():
                             if os.path.exists(adjunto_path_temp):
                                 shutil.move(adjunto_path_temp, os.path.join(settings.PDF_ERROR_DIR, os.path.basename(adjunto_path_temp)))
                         finally:
-                            # Asegurarse de eliminar el ZIP original después de que process_document_logic lo haya manejado
-                            if adjunto_path_temp.lower().endswith('.zip') and os.path.exists(adjunto_path_temp):
+                            if os.path.exists(adjunto_path_temp):
                                 os.remove(adjunto_path_temp)
-
         except Exception as e:
             logger.critical(f"Error crítico en la etapa de ingesta de correos: {e}", exc_info=True)
         logger.info(f"Tiempo total para procesar correos: {time.time() - start_time} segundos")
         time.sleep(settings.EMAIL_CHECK_INTERVAL_SECONDS)
-
-        # --- Bloque de procesamiento de PDF_INPUT_DIR ---
         processed_count = 0
         inbox_files = os.listdir(settings.PDF_INPUT_DIR)
         if not inbox_files:
             logger.info(f"No hay nuevos PDFs en {settings.PDF_INPUT_DIR} para procesar en este ciclo.")
         for filename in inbox_files:
             file_full_path = os.path.join(settings.PDF_INPUT_DIR, filename)
-            # Asegúrate de que solo procesa archivos, no directorios si hubiese
             if os.path.isfile(file_full_path) and (filename.lower().endswith(".pdf") or filename.lower().endswith(".zip")):
                 logger.info(f"Iniciando procesamiento de archivo del inbox: {filename}")
-                email_metadata_for_invoice = {} # No hay metadata de correo para archivos directos en inbox
+                email_metadata_for_invoice = {} 
                 parts = filename.split('_')
                 if len(parts) >= 3:
                     if len(parts) > 3 and '@' in parts[2]:
                         email_metadata_for_invoice["correo_cliente"] = parts[2]
-
                 try:
-                    # ¡Aquí también llamas a la nueva función unificada!
                     extracted_data = process_document_logic(file_full_path, email_metadata_for_invoice)
-
                     if extracted_data:
                         invoice_id = save_invoice_to_db(extracted_data)
                         if invoice_id:
                             processed_count += 1
-                            # Mover el archivo original (PDF o ZIP)
                             destination_path_processed = os.path.join(settings.PDF_PROCESSED_DIR, filename)
                             shutil.move(file_full_path, destination_path_processed)
                             logger.info(f"Archivo '{filename}' procesado y movido a {destination_path_processed}")
@@ -558,7 +524,7 @@ def run_invoice_processing_loop():
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         command = sys.argv[1]
-        init_db()
+        init_db() 
         if command == 'apply_header_correction':
             if len(sys.argv) == 6:
                 invoice_id = int(sys.argv[2])

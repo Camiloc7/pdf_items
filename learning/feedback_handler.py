@@ -185,8 +185,9 @@ class FeedbackHandler:
         for db_field_name, corrected_value in header_corrections.items():
             mapped_field_name = field_mapping.get(db_field_name)
             if mapped_field_name and mapped_field_name in extracted_data:
-                logger.debug(f"Aplicando corrección de cabecera para '{mapped_field_name}': '{extracted_data.get(mapped_field_name)}' -> '{corrected_value}'")
-                extracted_data[mapped_field_name] = corrected_value
+                if extracted_data[mapped_field_name]:  
+                    logger.debug(f"Aplicando corrección de cabecera para '{mapped_field_name}': '{extracted_data.get(mapped_field_name)}' -> '{corrected_value}'")
+                    extracted_data[mapped_field_name] = corrected_value
             elif mapped_field_name:
                 logger.warning(f"Campo de cabecera '{mapped_field_name}' (mapeado de '{db_field_name}') no encontrado en los datos extraídos para aplicar corrección.")
             else:
@@ -212,15 +213,11 @@ class FeedbackHandler:
                     logger.warning(f"No se pudo convertir el monto corregido '{extracted_data[amount_field]}' a número para {amount_field}.")
 
         extracted_data['items'] = self.apply_item_corrections_to_items_data(invoice_id, extracted_data.get('items', []))
-
         return extracted_data
-
     def apply_item_corrections_to_items_data(self, invoice_id: int, extracted_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         logger.debug(f"Aplicando correcciones de ítems para la factura ID: {invoice_id}")
         item_corrections = self.item_correction_crud.get_item_corrections_for_invoice(invoice_id)
-
         current_items = {self._get_item_hash(item): item for item in extracted_items}
-        
         for correction in item_corrections:
             try:
                 if correction.tipo_correccion == 'eliminar':
@@ -262,7 +259,6 @@ class FeedbackHandler:
                 logger.warning(f"Error al deserializar JSON en corrección de ítem tipo 'añadir'.")
             except Exception as e:
                 logger.error(f"Error al procesar corrección de ítem '{correction.id}': {e}", exc_info=True)
-
         final_items = list(current_items.values())
         for item in final_items:
             if 'quantity' in item and isinstance(item['quantity'], str):
@@ -280,18 +276,14 @@ class FeedbackHandler:
                     item['line_total'] = float(item['line_total'].replace('.', '').replace(',', '.'))
                 except ValueError:
                     logger.warning(f"No se pudo convertir total_linea '{item['line_total']}' a float para ítem: {item.get('description')}")
-
         return final_items
-
     def _get_item_hash(self, item: Dict[str, Any]) -> str:
         desc = str(item.get('description', '')).strip().lower()
         qty = item.get('quantity')
         price = item.get('unit_price')
         return f"{desc}|{qty}|{price}"
-
     def get_item_corrections_for_invoice(self, invoice_id: int) -> List[ItemCorregido]:
         return self.item_correction_crud.get_item_corrections_for_invoice(invoice_id)
-
     def close_db_session(self):
         if self.db_session and self.db_session.is_active:
             self.db_session.close()
@@ -299,7 +291,6 @@ class FeedbackHandler:
 
     def __del__(self):
         self.close_db_session()
-
 class FeedbackHandlerML:
     def __init__(self, model_path: str):
         try:
@@ -309,13 +300,10 @@ class FeedbackHandlerML:
         except FileNotFoundError:
             logger.error(f"No se encontró el modelo en '{model_path}'. Por favor, entrene el modelo primero.")
             raise
-
     def predict_correction(self, field_name: str, original_value: str) -> str:
-        # Crear un vector de características para el modelo
         features = pd.DataFrame([{
             "field_name": field_name,
             "original_value": original_value
         }])
-        # Predecir el valor corregido
         predicted_value = self.model.predict(features)[0]
         return predicted_value

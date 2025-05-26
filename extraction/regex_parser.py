@@ -116,44 +116,40 @@ class RegexParser:
         extracted_data: Dict[str, Any] = {}
         for field, pattern in self.combined_patterns.items():
             match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
-            if match:
-                if len(match.groups()) >= 1:
-                    value = match.group(1).strip()
-                    if "amount" in field:
-                        extracted_data[field] = self._parse_amount(value)
-                    elif "date" in field:
-                        extracted_data[field] = self._parse_date(value)
-                    elif "tax_id" in field:
-                        extracted_data[field] = self._normalizar_nit(value)
-                    elif field == "currency":
-                        if '$' in value:
-                            extracted_data[field] = 'COP'
-                        elif '€' in value:
-                            extracted_data[field] = 'EUR'
-                        elif 'USD' in value.upper():
-                            extracted_data[field] = 'USD'
-                        elif 'MXN' in value.upper():
-                            extracted_data[field] = 'MXN'
-                        else:
-                            extracted_data[field] = value.upper() 
-                    elif field == "cufe":
-                        url_match = re.search(r'https?:\/\/(?:www\.)?dian\.gov\.co\/validador\/.*\?cufe=([0-9a-fA-F\-]{32,96})', value, re.IGNORECASE)
-                        if url_match:
-                            extracted_data[field] = url_match.group(1).strip()
-                        else:
-                            extracted_data[field] = value
-                    elif field == "email": 
-                        extracted_data[field] = value
+            if match and field not in extracted_data:  # Solo extraer si el campo no está en los datos del XML
+                extracted_data[field] = match.group(1).strip()
+                if "amount" in field:
+                    extracted_data[field] = self._parse_amount(extracted_data[field])
+                elif "date" in field:
+                    extracted_data[field] = self._parse_date(extracted_data[field])
+                elif "tax_id" in field:
+                    extracted_data[field] = self._normalizar_nit(extracted_data[field])
+                elif field == "currency":
+                    if '$' in extracted_data[field]:
+                        extracted_data[field] = 'COP'
+                    elif '€' in extracted_data[field]:
+                        extracted_data[field] = 'EUR'
+                    elif 'USD' in extracted_data[field].upper():
+                        extracted_data[field] = 'USD'
+                    elif 'MXN' in extracted_data[field].upper():
+                        extracted_data[field] = 'MXN'
                     else:
-                        extracted_data[field] = value
-                    logger.debug(f"Regex: Extraído '{field}': '{extracted_data.get(field)}' de '{value}'")
+                        extracted_data[field] = extracted_data[field].upper() 
+                elif field == "cufe":
+                    url_match = re.search(r'https?:\/\/(?:www\.)?dian\.gov\.co\/validador\/.*\?cufe=([0-9a-fA-F\-]{32,96})', extracted_data[field], re.IGNORECASE)
+                    if url_match:
+                        extracted_data[field] = url_match.group(1).strip()
+                    else:
+                        extracted_data[field] = extracted_data[field]
+                elif field == "email": 
+                    extracted_data[field] = extracted_data[field]
                 else:
-                    extracted_data[field] = None
-                    logger.warning(f"Regex: Patrón '{field}' coincidió, pero no se encontró el grupo de captura (1). Patrón: {pattern}. Texto: '{text[match.start():match.end()]}'")
+                    extracted_data[field] = extracted_data[field]
+                logger.debug(f"Regex: Extraído '{field}': '{extracted_data.get(field)}' de '{extracted_data[field]}'")
             else:
                 extracted_data[field] = None
                 logger.debug(f"Regex: No se encontró '{field}'.")
-        
+
         if not extracted_data.get("supplier_name") and remitente_correo:
             if '@' in remitente_correo:
                 domain_part = remitente_correo.split('@')[1].split('.')[0]
@@ -236,4 +232,3 @@ class RegexParser:
         elif not line_items and not item_section_started:
             logger.info("Regex: No se detectó sección de ítems ni se extrajeron ítems.")
         return line_items
-    

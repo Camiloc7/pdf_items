@@ -7,7 +7,7 @@ from sklearn.pipeline import make_pipeline
 import spacy
 import schedule
 import time
-from typing import Dict, Any  # Importación corregida
+from typing import Dict, Any 
 from learning.feedback_handler import FeedbackHandlerML
 from extraction.nlp_parser import NLPParserML
 from database.crud import CorrectedFieldCRUD
